@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Analyzing-Behavioral-Patterns-in-ADHD-Patients (Synthetic Data)
+
+This script generates a synthetic dataset (>100 samples) for ADHD vs. Control groups
+and runs a compact analysis pipeline:
+- Dataset generation with realistic correlations
+- Descriptive statistics and effect sizes
+- PCA visualization
+- KMeans clustering
+- Random Forest classification with metrics & feature importances
+- Optional plots (matplotlib; no seaborn)
+- Saves dataset to CSV
+
+USAGE
+-----
+python analyzing_behavioral_patterns_ADHD.py --n 600 --seed 42 --no-plots
+python analyzing_behavioral_patterns_ADHD.py --n 800 --seed 7
+
+DEPENDENCIES
+------------
+pip install numpy pandas scikit-learn matplotlib
+"""
+
+import argparse
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score, roc_auc_score, classification_report, confusion_matrix
+)
+
+# -------------------------------
+# Data Generation
+# -------------------------------
+
+def generate_synthetic_data(n=600, seed=42):
+    """
+    Generate a synthetic dataset with ADHD vs Control groups.
+    Returns a DataFrame with demographic and behavioral features.
+    """
+    rng = np.random.default_rng(seed)
+    # Group assignment (approx. 40% ADHD)
+    group = rng.choice(["ADHD", "Control"], size=n, p=[0.4, 0.6])
+
+    # Demographics
+    age = rng.normal(loc=14.5, scale=2.5, size=n).clip(8, 18)   # adolescents
+    sex = rng.choice(["M", "F"], size=n, p=[0.55, 0.45])
+
+    # Latent factors: inattention & hyperactivity (correlated with group)
+    inattention = rng.normal(0, 1, n) + (group == "ADHD") * 0.9
+    hyperactivity = (
+        0.4 * inattention + rng.normal(0, 0.9, n) + (group == "ADHD") * 0.7
+    )
+
+    # Features derived from latent traits + noise
+    attention_span_min = (
+        25 - 6 * inattention + rng.normal(0, 2.5, n)
+    )
+    impulsivity_score = (
+        45 + 7 * hyperactivity + 3 * inattention + rng.normal(0, 3.0, n)
+    )
+    hyperactivity_index = (
+        40 + 8 * hyperactivity + rng.normal(0, 4.0, n)
+    )
+
+    # Reaction time and variability
+    reaction_time_ms = (
+        450 + 25 * inattention + 15 * hyperactivity + rng.normal(0, 30, n)
+    )
+    reaction_time_sd = (
+        65 + 15 * inattention + 8 * hyperactivity + rng.normal(0, 8, n)
+    )
+
+    # Task performance
+    error_rate = (
+        0.10 + 0.03 * inattention + 0.02 * hyperactivity + rng.normal(0, 0.02, n)
+    ).clip(0, 1)
+    task_switch_rate = (
+        0.25 + 0.05 * hyperactivity + 0.03 * inattention + rng.normal(0, 0.02, n)
+    ).clip(0, 1)
+
+    # Sleep & activity
+    sleep_quality = (
+        70 - 6 * inattention - 5 * hyperactivity + rng.normal(0, 5, n)
+    )
+    movement_count = (
+        300 + 40 * hyperactivity + rng.normal(0, 40, n)
+    )
+
+    # Slight age effect adjustments
+    attention_span_min += (18 - age) * 0.2
+    reaction_time_ms += (18 - age) * 2.0
+
+    df = pd.DataFrame({
+        "group": group,
+        "age": age.round(2),
+        "sex": sex,
+        "attention_span_min": attention_span_min,
+        "impulsivity_score": impulsivity_score,
+        "hyperactivity_index": hyperactivity_index,
+        "reaction_time_ms": reaction_time_ms,
+        "reaction_time_sd": reaction_time_sd,
+        "error_rate": error_rate,
+        "task_switch_rate": task_switch_rate,
+        "sleep_quality": sleep_quality,
+        "movement_count": movement_count,
+    })
+
+    # Clean up ranges
+    df["attention_span_min"] = df["attention_span_min"].clip(5, 45)
+    df["impulsivity_score"] = df["impulsivity_score"].clip(20, 100)
+    df["hyperactivity_index"] = df["hyperactivity_index"].clip(10, 100)
+    df["reaction_time_ms"] = df["reaction_time_ms"].clip(250, 900)
+    df["reaction_time_sd"] = df["reaction_time_sd"].clip(20, 150)
+    df["sleep_quality"] = df["sleep_quality"].clip(10, 100)
+    df["movement_count"] = df["movement_count"].clip(50, 1000)
+
+    return df
+
+# -------------------------------
+# Analysis Utilities
+# -------------------------------
+
+def cohen_d(x, y):
+    nx, ny = len(x), len(y)
+    sx, sy = np.var(x, ddof=1), np.var(y, ddof=1)
+    sp = np.sqrt(((nx - 1) * sx + (ny - 1) * sy) / (nx + ny - 2))
+    return (np.mean(x) - np.mean(y)) / sp
+
+def describe_by_group(df, features):
+    rows = []
+    for feat in features:
+        a = df[df["group"] == "ADHD"][feat].values
+        c = df[df["group"] == "Control"][feat].values
+        d = cohen_d(a, c)
+        rows.append({
+            "feature": feat,
+            "ADHD_mean": np.mean(a),
+            "Control_mean": np.mean(c),
+            "Cohens_d": d
+        })
+    return pd.DataFrame(rows)
+
+# -------------------------------
+# Visualization
+# -------------------------------
+
+def plot_histograms(df, features, bins=30):
+    for feat in features:
+        plt.figure()
+        for grp in ["ADHD", "Control"]:
+            df[df["group"] == grp][feat].plot(kind="hist", alpha=0.5, bins=bins, label=grp)
+        plt.title(f"Distribution of {feat}")
+        plt.xlabel(feat)
+        plt.ylabel("Count")
+        plt.legend()
+        plt.tight_layout()
+
+def pca_scatter(df, features):
+    X = df[features].values
+    y = (df["group"] == "ADHD").astype(int).values
+    Xs = StandardScaler().fit_transform(X)
+    pca = PCA(n_components=2, random_state=0)
+    Z = pca.fit_transform(Xs)
+
+    plt.figure()
+    plt.scatter(Z[y==1, 0], Z[y==1, 1], alpha=0.7, label="ADHD")
+    plt.scatter(Z[y==0, 0], Z[y==0, 1], alpha=0.7, label="Control")
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.title("PCA of Behavioral Features")
+    plt.legend()
+    plt.tight_layout()
+
+# -------------------------------
+# Clustering & Classification
+# -------------------------------
+
+def kmeans_clustering(df, features, k=2, seed=42):
+    Xs = StandardScaler().fit_transform(df[features].values)
+    km = KMeans(n_clusters=k, random_state=seed, n_init=10)
+    labels = km.fit_predict(Xs)
+    table = pd.crosstab(df["group"], labels, rownames=["Group"], colnames=["Cluster"])
+    return labels, table
+
+def classify_random_forest(df, features, seed=42):
+    X = df[features].values
+    y = (df["group"] == "ADHD").astype(int).values
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.25, random_state=seed, stratify=y
+    )
+    scaler = StandardScaler()
+    X_train_s = scaler.fit_transform(X_train)
+    X_test_s = scaler.transform(X_test)
+
+    clf = RandomForestClassifier(
+        n_estimators=300, max_depth=None, random_state=seed, n_jobs=-1
+    )
+    clf.fit(X_train_s, y_train)
+    y_pred = clf.predict(X_test_s)
+    y_proba = clf.predict_proba(X_test_s)[:, 1]
+
+    acc = accuracy_score(y_test, y_pred)
+    auc = roc_auc_score(y_test, y_proba)
+
+    report = classification_report(y_test, y_pred, target_names=["Control", "ADHD"])
+    cm = confusion_matrix(y_test, y_pred)
+
+    importances = pd.Series(clf.feature_importances_, index=features).sort_values(ascending=False)
+
+    return {
+        "accuracy": acc,
+        "auc": auc,
+        "report": report,
+        "confusion_matrix": cm,
+        "feature_importances": importances
+    }
+
+def plot_feature_importances(importances, top_n=10):
+    imp = importances.head(top_n)
+    plt.figure()
+    imp[::-1].plot(kind="barh")
+    plt.title(f"Top {top_n} Feature Importances (Random Forest)")
+    plt.xlabel("Importance")
+    plt.tight_layout()
+
+# -------------------------------
+# Main
+# -------------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n", type=int, default=600, help="Number of samples (>100)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--no-plots", action="store_true", help="Disable plotting")
+    parser.add_argument("--out", type=str, default="adhd_synthetic_dataset.csv", help="CSV output path")
+    args = parser.parse_args()
+
+    df = generate_synthetic_data(n=args.n, seed=args.seed)
+    df.to_csv(args.out, index=False)
+    print(f"[+] Saved dataset to: {args.out} (n={len(df)})")
+
+    features = [
+        "attention_span_min", "impulsivity_score", "hyperactivity_index",
+        "reaction_time_ms", "reaction_time_sd", "error_rate", "task_switch_rate",
+        "sleep_quality", "movement_count", "age"
+    ]
+
+    desc = describe_by_group(df, features)
+    print("\n=== Descriptive Stats & Effect Sizes ===")
+    print(desc)
+
+    if not args.no_plots:
+        pca_scatter(df, features)
+
+    labels, table = kmeans_clustering(df, features, k=2, seed=args.seed)
+    print("\n=== KMeans Clustering Crosstab ===")
+    print(table)
+
+    results = classify_random_forest(df, features, seed=args.seed)
+    print("\n=== Random Forest Classification ===")
+    print(f"Accuracy: {results['accuracy']:.3f}")
+    print(f"ROC AUC : {results['auc']:.3f}")
+    print("\nClassification Report:\n", results["report"])
+    print("Confusion Matrix:\n", results["confusion_matrix"])
+
+    if not args.no_plots:
+        plot_feature_importances(results["feature_importances"], top_n=10)
+        plot_histograms(df, ["attention_span_min", "impulsivity_score", "reaction_time_ms", "sleep_quality"])
+        plt.show()
+
+if __name__ == "__main__":
+    main()
